@@ -1,13 +1,23 @@
 # tokimeki (Python)
 
-Submit Python functions as tokimeki jobs, wait on their group, and read their
-results. A thin wrapper around the `tokimeki` CLI: every call runs
-`tok ... --json`, and the package writes no files.
+Submit Python functions as tokimeki jobs from Python, wait on their group and
+read their return values. The package is a thin layer over the `tokimeki`
+CLI: every call runs one `tok ... --json` command, and the package writes no
+files.
 
-Requires the `tokimeki` binary (v0.5.0 or later) on `PATH`, or named by
-`$TOKIMEKI_BIN`. Inside a job the runner sets `$TOKIMEKI_BIN` for you.
+How jobs, runners, groups and coordinators work is described once, in the CLI
+docs:
 
-## A sweep coordinator
+- [How Tokimeki works](../tokimeki-cli/docs/HOW-IT-WORKS.md): the job life
+  cycle, runners and slots, groups and coordinators, results, and the files
+  behind them, including how Python jobs flow.
+- [Usage](../tokimeki-cli/docs/USAGE.md): every command, the `--from-json`
+  request format, the JSON output and the job environment.
+
+Requirements: the `tokimeki` binary (v0.5.0+) on `PATH` or named by
+`$TOKIMEKI_BIN` (the runner sets it inside jobs), and Python 3.9+.
+
+## Example: a sweep coordinator
 
 ```python
 # scripts/sweep.py, submitted once:
@@ -30,69 +40,88 @@ def main(grid_path):
             group.submit(run_experiment, cfg, desc=cfg["run_id"], retries=1)
 
     report = group.wait(poll=60)
-    results = {
+    return {
         job.desc: group.result(job)
         for job in report.jobs
         if job.kind == "compute" and job.status == "completed"
     }
-    for job in report.failed:
-        print(f"{job.desc}: {job.error.type if job.error else job.status}", file=sys.stderr)
-    return results
 
 
 if __name__ == "__main__":
     main(sys.argv[1])
 ```
 
-Each `submit` queues one compute job: whichever runner has a free compute
-slot runs `run_experiment(cfg)` in your uv project. What it returns (any
-JSON-serializable value) is read back with `group.result(job)`; if it raises,
-the job fails and `job.error` says why.
-
-## How a job runs
-
-The runner starts each job as
-
-```
-uv run --project <project> --no-sync python -m tokimeki.call <module:function>
-```
-
-in the job's working directory (both default to the directory you submitted
-from). So:
-
-- `tokimeki` must be a dependency of your uv project, and the project's
-  environment must be synced (`uv sync`) before you submit; jobs don't sync.
-- The function must be a top-level function of an importable module, or of
-  the script you run (it is then loaded without running its
-  `if __name__ == "__main__":` block).
-- Its argument and return value must be JSON-serializable; the argument is at
-  most 64 KiB.
-
-`python -m tokimeki.call` exits 0 when the function returns, 1 when it raises,
-and 2 when it can't be loaded.
-
 ## API
 
-| | |
-|---|---|
-| `tk.Group(name, home=None)` | A group label; `home` overrides `$TOKIMEKI_HOME` |
-| `Group.submit(fn, arg, *, desc, priority, cpus, mem_mb, retries, backoff, after, project, cwd, worker)` | Queue `fn(arg)`; returns `Submitted(job_id, position)` |
-| `Group.report()` | `GroupReport`: counts for coordinators and compute jobs, failed, stopped and all jobs |
-| `Group.jobs()` | Every `Job` in the group (empty if none) |
-| `Group.wait(poll=60)` | Block until no job but the caller is queued, running or retrying |
-| `Group.result(job)` | The job function's return value |
-| `tk.current_group()`, `tk.current_job_id()` | The running job's group and ID |
-| `tk.get_job_entry_from_func(fn)` | The `module:function` name a job would run |
+Each function maps to one CLI command; the docstrings (`help(tk.Group)`)
+give the parameters.
 
-Errors raise `tk.TokimekiError` with `.code` (`not_found`,
-`invalid_argument`, `invalid_state`, ...). Warnings from tokimeki (for
-example about job records from older versions) are issued as
-`tk.TokimekiWarning`. With the `tokimeki` logger at DEBUG level, the CLI's
-debug log is passed to `logging`.
+| Python | CLI |
+|---|---|
+| `tk.Group(name, home=None)` | a group label (`-g`); `home` is `--base` |
+| `Group.submit(fn, arg, ...)` | `tok submit --from-json -` with type `python-uv` |
+| `Group.report()`, `Group.jobs()` | `tok group NAME --json` |
+| `Group.wait(poll=60)` | `tok group NAME --wait --poll ...` |
+| `Group.result(job)` | `tok result ID` |
+| `tk.current_group()`, `tk.current_job_id()` | `$TOKIMEKI_GROUP`, `$TOKIMEKI_JOB_ID` |
+| `tk.TokimekiError` (`.code`) | the CLI's `{"error": {"code", "message"}}` |
+| `tk.TokimekiWarning` | the CLI's warnings (`{"notice": ...}` on stderr) |
+
+With the `tokimeki` logger at DEBUG level, calls pass `--verbose` and the
+CLI's debug lines go to `logging`.
+
+## The job runtime: `python -m tokimeki.call`
+
+The runner starts every Python job as
+
+```
+uv run --project <project> --no-sync python -m tokimeki.call <entry>
+```
+
+in the job's working directory, with the uv on the runner's `PATH`.
+`tokimeki.call` then:
+
+1. reads the job with `tok job $TOKIMEKI_JOB_ID --json` and checks it is a
+   `python-uv` job (execute ABI 2) for this entry;
+2. imports the function: `module:function` from the project (or from the
+   working directory), or `/abs/path/script.py:function` from a script file;
+3. calls `function(arg)` with the job's argument (`None` if none was given);
+4. reports the outcome with `tok report --from-json -`:
+   - the return value as the job's result, unless it is `None`;
+   - an exception as the job's error: stage, exception type, message and
+     traceback (the traceback also goes to the job's stderr log).
+
+| Exit code | Meaning | Reported error stage |
+|---|---|---|
+| 0 | the function returned | |
+| 1 | the function raised, or its return value isn't JSON-serializable or couldn't be reported | `run` / `result` |
+| 2 | the function couldn't be loaded (bad entry, import error, not a python-uv job) | `load` |
+
+What this means for your code:
+
+- **Your project must be ready before you submit.** `tokimeki` must be one
+  of its dependencies, and its environment must be synced (`uv sync`). Jobs
+  run with `--no-sync`, so many jobs starting at once don't fight over one
+  `.venv`.
+- **The function must be importable on the runner's node:** a top-level
+  function of your installed package, of a module in the job's working
+  directory, or of the script you submitted from. Lambdas, methods and
+  nested functions are rejected at submit.
+- **Scripts are imported, not run.** For a function defined in a script, the
+  script is loaded under another module name, so its
+  `if __name__ == "__main__":` block doesn't run again. Its top-level code
+  does run, as on any import, so keep work inside functions or that block.
+- **Arguments and results are JSON.** `arg` must be JSON-serializable and at
+  most 64 KiB; return something JSON-serializable, or `None` for no result.
+  Large outputs (checkpoints, CSVs) belong in files your code writes itself.
+- **Killing works on the whole job.** `tok kill`, or a kill cascading from
+  the coordinator, signals uv, Python and anything they started.
 
 ## Development
 
 ```bash
-uv run --group dev pytest                                   # unit tests
+uv run --group dev pytest                                   # unit tests (a stand-in tok)
 TOKIMEKI_TEST_BIN=/path/to/tok uv run --group dev pytest    # plus end-to-end tests with a real runner
 ```
+
+Design notes: [docs/design.md](docs/design.md).
