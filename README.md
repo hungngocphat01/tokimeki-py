@@ -51,11 +51,15 @@ Before Tokimeki v0.5.0, we generally ran sweeps using one script per backbone, t
 
 ### Coordinators
 
-A coordinator is a job whose purpose is to submit other jobs, wait for them to finish, and collect their results.
+A coordinator is a job whose purpose is to submit other jobs, wait for them to finish, and collect their results. Think of it like a distributed for-loop (see an actual example in the following section).
 
-Rather than writing a shell script that loops over the learning rates and trains each model itself, we can write a Python script that submits each training function call as a separate job. All these jobs go into the same shared queue, and any runner with a free executor can pick them up. The return values of the function calls are also accessible from the coordinator, so we no longer need to manage separate result files for each experiment.
+Rather than writing a shell script that loops over the learning rates and trains each model itself, we can write a Python script that submits each training **function call** as a separate job. All these jobs go into the same shared queue, and any runner with a free executor can pick them up. The return values of the function calls are also accessible from the coordinator, so we no longer need to manage separate result files for each experiment.
 
-Each runner has a number of executors configured through `--compute-threads`, along with one dedicated coordinator slot. This means that a coordinator can spend its time waiting for experiments without occupying an executor that could otherwise be running one of them.
+![Three GPU nodes, each a runner with one coordinator slot and two executors. The AlexNet coordinator on node 1 and the VGG coordinator on node 2 submit trials to the shared filesystem; node 3's coordinator slot is empty. Executors on all three nodes take trials, so AlexNet and VGG trials run mixed across all three nodes](assets/coordinators.svg)
+
+The two colours represent the experiments of the two coordinators. Both coordinators submit their experiments through the shared filesystem, and all six executors are available to run them.
+
+Unlike the original shell scripts, AlexNet experiments are no longer tied to one particular node, nor are VGG experiments. Whenever an executor becomes available, it can pick up another experiment from the queue.
 
 **A coordinator doesn't necessarily have to run on a GPU node.** Since it only submits jobs and waits for their results, you can also run the Python script directly on your client (e.g., the login node). You'll need to keep the process alive until the experiments finish, for example by running it inside `tmux`. You also won't have the benefits of submitting the coordinator as a Tokimeki job, such as automatic retries and the ability to stop the entire group by killing or cancelling the coordinator.
 
@@ -63,7 +67,7 @@ Since the overhead of such script is minimal, in this guide, for simplicity, we 
 
 ### Groups
 
-A group is simply a name shared by a set of related jobs. Groups allow us to track those jobs and wait for them collectively, regardless of which runners execute them. A coordinator and the jobs it submits share the same group name. For our hyperparameter sweep, we'll use a separate group for each backbone.
+A group is simply a name shared by a set of related jobs. Groups allow us to track those jobs and wait for them collectively, regardless of which runners execute them. A coordinator and the jobs it submits share the same group name. For our hyperparameter sweep, we'll use a separate group for each backbone; in the illustration above, each colour is one group.
 
 ### Example: sweeping the learning rate for AlexNet
 
@@ -78,7 +82,7 @@ def train_trial(config):
     return {"lr": config["lr"], "score": score}
 ```
 
-Next, write the coordinator in `scripts/sweep_alexnet.py`:
+Next, write the *coordinator script* as `scripts/sweep_alexnet.py`:
 
 ```python
 import json
@@ -124,17 +128,7 @@ Note that a group includes all jobs with the same name until they are removed by
 
 Killing or cancelling a coordinator also stops the other jobs in its group.
 
-Now suppose we have three runners, each started with `--compute-threads 2`. Since a runner can host at most one coordinator, the AlexNet and VGG coordinators will run on different nodes (nodes 1 and 2 in the illustration below).
-
-Node 3 has no coordinator because we've only submitted two. However, its executors can still pick up experiments submitted by either coordinator.
-
-![Three GPU nodes, each a runner with one coordinator slot and two executors. The AlexNet coordinator on node 1 and the VGG coordinator on node 2 submit trials to the shared filesystem; node 3's coordinator slot is empty. Executors on all three nodes take trials, so AlexNet and VGG trials run mixed across all three nodes](assets/coordinators.svg)
-
-The two colours represent the two groups. Both coordinators submit their experiments through the shared filesystem, and all six executors are available to run them.
-
-Unlike the original shell scripts, AlexNet experiments are no longer tied to one particular node, nor are VGG experiments. Whenever an executor becomes available, it can pick up another experiment from the queue.
-
-At the same time, `sweep_alexnet.py` only needs to wait for and collect the results of the AlexNet experiments. The VGG coordinator does the same for its own group.
+Because each coordinator has its own group, `sweep_alexnet.py` only needs to wait for and collect the results of the AlexNet experiments, even though they run mixed with the VGG ones. The VGG coordinator does the same for its own group.
 
 Adding a ViT sweep would follow exactly the same pattern: write another coordinator and submit it with a separate group name.
 
