@@ -14,11 +14,22 @@ files.
 How jobs, runners, groups and coordinators work is described once, in the CLI
 docs:
 
-- [How Tokimeki works](../tokimeki-cli/docs/HOW-IT-WORKS.md): the job life
+- [How Tokimeki works](https://github.com/hungngocphat01/tokimeki-cli/blob/main/docs/HOW-IT-WORKS.md): the job life
   cycle, runners and slots, groups and coordinators, results, and the files
   behind them, including how Python jobs flow.
-- [Usage](../tokimeki-cli/docs/USAGE.md): every command, the `--from-json`
+- [Usage](https://github.com/hungngocphat01/tokimeki-cli/blob/main/docs/USAGE.md): every command, the `--from-json`
   request format, the JSON output and the job environment.
+
+## Install
+
+In your uv project (e.g. evident):
+
+```bash
+uv add "tokimeki @ git+ssh://git@github.com/hungngocphat01/tokimeki-py@v0.5.0"
+uv sync
+```
+
+Use the same version as the `tokimeki` binary on your cluster.
 
 Requirements: the `tokimeki` binary (v0.5.0+) on `PATH` or named by
 `$TOKIMEKI_BIN` (the runner sets it inside jobs), and Python 3.9+.
