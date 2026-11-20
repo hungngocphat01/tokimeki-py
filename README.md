@@ -1,3 +1,5 @@
+<img src="assets/tokimeki.jpeg" alt="Tokimeki" style="max-width: 768px;">
+
 # Tokimeki for Python
 
 Tokimeki for Python lets you submit experiments directly from a Python script and collect their return values. If you have several GPU nodes running [Tokimeki runners](https://github.com/hungngocphat01/tokimeki-cli), you can submit a function with different configurations, wait for the experiments to finish, and process the results within the same script. This is extremely useful, especially when you have to run multiple large experiment grids (for hyperparameter tuning, for example).
