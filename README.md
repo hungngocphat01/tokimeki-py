@@ -183,4 +183,4 @@ Both the argument passed to the function and its return value must be JSON-seria
 
 For larger outputs, such as model checkpoints, write them to files in your project directory instead of returning them directly.
 
-See `help(tk.Group.submit)` for the available scheduling options and the [CLI usage guide](https://github.com/hungngocphat01/tokimeki-cli/blob/main/docs/USAGE.md) for more information on managing jobs.
+The [usage guide](docs/USAGE.md) covers every option and the other use cases: chaining jobs, running the coordinator on the login node, handling failed and stopped jobs, and restarting a coordinator without duplicates. See `help(tk.Group.submit)` for the available scheduling options and the [CLI usage guide](https://github.com/hungngocphat01/tokimeki-cli/blob/main/docs/USAGE.md) for more information on managing jobs.

@@ -1,5 +1,5 @@
 """Results of CLI calls, mirroring the ``--json`` schema (tokimeki-cli
-docs/USAGE.md, "JSON output"). Each keeps the full JSON in ``raw``."""
+docs/USAGE.md, "Scripting with --json"). Each keeps the full JSON in ``raw``."""
 
 from __future__ import annotations
 
