@@ -1,5 +1,11 @@
 # tokimeki (Python)
 
+The `tokimeki` package, imported as `tk` by convention:
+
+```python
+import tokimeki as tk
+```
+
 Submit Python functions as tokimeki jobs from Python, wait on their group and
 read their return values. The package is a thin layer over the `tokimeki`
 CLI: every call runs one `tok ... --json` command, and the package writes no
