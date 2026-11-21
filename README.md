@@ -26,6 +26,8 @@ Meanwhile, the coordinator can wait for all experiments to finish, collect their
 
 ![Three GPU nodes with separate coordinator and compute slots. Two coordinators submit trials to the shared queue; compute slots across all three nodes take those trials](assets/coordinators.svg)
 
+Even with this paradigm, Tokimeki still remains **masterless**. A coordinator is not a master daemon. If the coordinator script dies, jobs it submitted still remain in the queue. Since the coordinator script might gets *retried* by the scheduler, you should handle submission deduplication inside the coordinator. See a section below for more information.
+
 ## How a Python job runs
 
 When the coordinator calls `group.submit()`, this package serializes the function's name and its argument and calls the Tokimeki CLI. A runner takes the job from the shared filesystem, runs the function in the project's Python environment with Tokimeki's Python runtime, which this package also happens to provide. The coordinator reads that value through the CLI with `group.result()`.
@@ -124,6 +126,36 @@ Inside the coordinator, `tk.current_group()` automatically opens this group. All
 Use a different group name for each experiment sweep. Groups retain their jobs until they are cleaned up with `tokimeki gc`.
 
 Once submitted, Tokimeki manages the coordinator and its compute jobs. The coordinator submits six training jobs, waits for their completion, and prints the collected results.
+### Avoid duplicate submissions on retry
+
+If a coordinator crashes or if the underlying GPU node goes offline, it might get retried by the scheduler. Without additional checks, the coordinator would submit the same experiments again.
+
+To avoid this, we can generate a stable hash for each configuration and check if those were submitted before. Replace the `jobs = [...]` block in `sweep.py` with:
+
+```python
+# get previously submitted job in the group
+previous_jobs = {
+    job.desc: job   # job.desc is a free-format field. here we use it to store the job's hash
+    for job in group.jobs() if job.kind == "compute"
+}
+
+new_jobs = []
+for config in configs:
+    # here the "hash" is simply the string form of the config
+    desc = f'{config["backbone"]} lr={config["lr"]}'
+    if desc not in previous_jobs:
+        job = group.submit(train_trial, config, desc=name)
+        new_jobs.append(job)
+
+group.wait()
+...
+```
+
+The coordinator now checks for existing jobs before submitting new ones. For example, if the AlexNet trial with `lr=0.01` was already submitted, the coordinator reuses it rather than creating a duplicate.
+
+The rest of the script remains unchanged: `group.wait()` waits for the group's active jobs, and `group.result(job)` retrieves each trial's result.
+
+Note that this approach does not retry failed jobs. We let the handling up to the user.
 
 ## Setup
 
