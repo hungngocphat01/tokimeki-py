@@ -1,18 +1,142 @@
 <img src="assets/tokimeki.jpeg" alt="Tokimeki" style="max-width: 768px;">
 
-# TOKIMEKI for Python
+# Tokimeki for Python
 
-Tokimeki for Python is part of Tokimeki v0.5.0+. This lets you submit experiments directly from Python. If you have several GPU nodes running [TOKIMEKI Runners](https://github.com/hungngocphat01/tokimeki-cli), you can submit a function with different configurations, wait for the experiments to finish, and process the results within the same script. This is extremely useful, especially when you have to run multiple large experiment grids (for hyperparameter tuning, for example).
+Tokimeki for Python lets you distribute Python function calls across multiple compute nodes using the [Tokimeki Scheduler](https://github.com/hungngocphat01/tokimeki-cli).
 
-The package does two things. First, it is a thin **wrapper** around the job accounting logic of the `tokimeki` CLI: submitting a job, inspecting and waiting for a group, and fetching a job's result each run one `tokimeki` command and parse its output, so the package never reads or writes Tokimeki's files itself. Second, it provides the Python **runtime** (`python -m tokimeki.call`) that runners use to launch Python jobs, which is why the project your jobs run in has to depend on it. See [How this works](#how-this-works) for both.
+It is particularly useful for running machine learning experiments, such as hyperparameter searches, where the same training function needs to be executed with different configurations. Instead of writing and managing separate shell scripts for each experiment, you can submit Python functions as jobs and collect their return values directly.
 
-Tokimeki requires all nodes to share a common (networked) filesystem. If you haven't set up your runners and a shared `TOKIMEKI_HOME` directory yet, see the [CLI](https://github.com/hungngocphat01/tokimeki-cli) docs first.
+The package also provides the Python runtime that executes these functions on Tokimeki runners.
 
-## 1. Installation
+## How it works
 
-You'll need Python 3.9+, [uv](https://docs.astral.sh/uv/), and the `tokimeki` binary available on `PATH` (alternatively, set `TOKIMEKI_BIN` when launching your Python script).
+Tokimeki for Python uses the new job orchestration daemons introduced in Tokimeki v0.5.0, which separates **job coordination** from **computation**.
 
-In your uv project:
+- **Coordinator:** A Python script that decides which jobs to run, submits them, waits for their completion, and processes their results.
+- **Compute jobs:** Individual function calls submitted by the coordinator. These execute on available Tokimeki runners.
+- **Job group:** A collection of jobs managed under the same group name. The coordinator uses this group to submit jobs and retrieve their results.
+
+For example, suppose you want to train multiple models with different hyperparameters. You write a training function that accepts a configuration and returns a score. The coordinator then submits that function once for each configuration.
+
+Each submission becomes an independent compute job. Available runners pick up these jobs from the shared queue, allowing multiple experiments to run concurrently across different nodes.
+
+Meanwhile, the coordinator can wait for all experiments to finish, collect their scores, and decide what to do next. It could, for instance, select the best configuration, submit a final training job, and then run ablation experiments.
+
+**The coordinator does not perform the computation itself.** Each runner has separate coordinator and compute slots, so a coordinator waiting for its jobs does not occupy a compute slot.
+
+![Three GPU nodes with separate coordinator and compute slots. Two coordinators submit trials to the shared queue; compute slots across all three nodes take those trials](assets/coordinators.svg)
+
+## How a Python job runs
+
+When the coordinator calls `group.submit()`, this package serializes the function's name and its argument and calls the Tokimeki CLI. A runner takes the job from the shared filesystem, runs the function in the project's Python environment with Tokimeki's Python runtime, which this package also happens to provide. The coordinator reads that value through the CLI with `group.result()`.
+
+For this to work, the arguments and return value of your submitted function must be serializable.
+
+![A coordinator serializes a Python function call and sends it through the Tokimeki CLI. A runner executes the function and reports its return value, which the coordinator reads through the CLI](assets/python-job.svg)
+
+## Quick example
+
+Suppose we want to compare AlexNet and VGG using several learning rates.
+
+We will define a function for training a single model, then write a coordinator that submits six experiments and collects their validation scores.
+
+### 1. Define the training script
+
+First, write the script that each *compute job* will execute.
+
+```python
+from model_trainer.training import train_model
+
+def train_trial(config):
+    score = train_model(config["backbone"], config["lr"])
+    return {"backbone": config["backbone"], "lr": config["lr"], "score": score}
+```
+
+It trains one model using the specified backbone and learning rate, then returns its validation score.
+
+### 2. Write the coordinator
+
+Next, create a script that generates the configurations, submits the jobs, and collects their results.
+
+```python
+# sweep.py
+import tokimeki as tk
+from model_trainer.jobs import train_trial
+
+# what's `group` and what does this returns? see the next section
+group = tk.current_group()
+configs = [
+    {"backbone": backbone, "lr": lr}
+    for backbone, rates in {
+        "alexnet": (0.01, 0.001, 0.0001),
+        "vgg": (0.02, 0.0025, 0.0003),
+    }.items()
+    for lr in rates
+]
+
+jobs = [
+    group.submit(train_trial, config, desc=f'{config["backbone"]} lr={config["lr"]}')
+    for config in configs
+]
+group.wait() # this blocks until all jobs finish
+
+# collect results
+results = [group.result(job) for job in jobs]
+df = run_analysis(results)
+df.to_parquet("...")
+```
+
+The important parts are:
+
+1. `tk.current_group()` obtains the job group associated with the running coordinator.
+2. `group.submit()` submits a Python function call as an independent compute job.
+3. `group.wait()` waits for the group's active jobs to finish.
+4. `group.result(job)` retrieves the Python value returned by a completed job.
+
+In this example, six compute jobs are submitted. They can execute concurrently on any available runners, regardless of which node is running the coordinator.
+
+The coordinator only manages these jobs and collects their results; the actual training happens on the compute nodes.
+
+### 3. Run the coordinator
+
+To run the coordinator through Tokimeki, create a shell script that wraps it.
+
+```bash
+#!/bin/bash
+set -e
+cd /shared/projects/model_trainer
+uv run --no-sync python sweep.py
+```
+
+Save it as `sweep.sh`, then submit it using the Tokimeki CLI:
+
+```bash
+tokimeki submit -C -g models-001 sweep.sh
+```
+
+Here:
+
+- `-C` runs the script as a **coordinator**, rather than a regular compute job.
+- `-g models-001` assigns it to the `models-001` job group.
+
+Inside the coordinator, `tk.current_group()` automatically opens this group. All compute jobs submitted through it belong to the same group.
+
+Use a different group name for each experiment sweep. Groups retain their jobs until they are cleaned up with `tokimeki gc`.
+
+Once submitted, Tokimeki manages the coordinator and its compute jobs. The coordinator submits six training jobs, waits for their completion, and prints the collected results.
+
+## Setup
+
+### Requirements
+
+- Python 3.9+
+- [uv](https://docs.astral.sh/uv/)
+- The `tokimeki` CLI available on `PATH`, or configured through `TOKIMEKI_BIN`
+- Configured [Tokimeki runners](https://github.com/hungngocphat01/tokimeki-cli#-setup) with a shared `TOKIMEKI_HOME`
+
+### Installation
+
+Install the package in the uv project that contains your training code:
 
 ```bash
 cd /shared/projects/model_trainer
@@ -20,197 +144,61 @@ uv add "tokimeki @ git+ssh://git@github.com/hungngocphat01/tokimeki-py@v0.5.0"
 uv sync
 ```
 
-The project and its synced Python environment must be accessible from every runner that may execute your jobs.
+The project directory and its synced Python environment must be accessible from every runner that may execute a compute job.
 
-## 2. What can this do?
+When a job starts, the runner uses the existing environment without installing or synchronizing packages.
 
-Suppose we want to train AlexNet with three different learning rates. If we only have one GPU node, we can simply write a shell script:
+## Running without a coordinator job
 
-```bash
-#!/bin/bash
-cd /shared/projects/model_trainer
-for lr in 0.01 0.001 0.0001; do
-    python train.py --backbone alexnet --lr "$lr"
-done
+A coordinator does not necessarily have to run as a Tokimeki job.
 
-# combine results after all experiment finishes
-find ./results -iname "alexnet-*.csv" -exec cat {} \; | tee combined-results.csv
-```
+You can also execute the Python script directly, for example on a login node or your local machine, provided it has access to the shared Tokimeki environment.
 
-The three experiments run sequentially on one node.
-
-Now suppose we have several GPU nodes. One way to distribute the experiments is to write a separate script for each learning rate (`train_alexnet_lr_0.01.sh`, `train_alexnet_lr_0.001.sh`, etc.), submit them individually, and aggregate the results afterwards. The [TOKIMEKI CLI](https://github.com/hungngocphat01/tokimeki-cli) already enabled this.
-
-This is manageable when we're only experimenting with one backbone (e.g. AlexNet). But what if we also want to also experiment with VGG and ViT, each with its own set of hyperparameters? We would end up maintaining quite a few scripts and result files.
-
-We could instead write one script per backbone (`train_alexnet.sh`, `train_vgg.sh`, ...), each containing a loop like the one above.
-
-However, the problem is that the GPU nodes won't necessarily finish at the same time. The node running AlexNet might have already finished all its experiments, while the node running ViT still has several configurations left to train. Those remaining experiments could have been run on the now-idle node.
-
-![One loop per backbone on three GPU nodes: node 1 has finished all AlexNet trials and is idle, node 2 is on its last VGG trial, and node 3 is still running ViT with two trials waiting that cannot move to the idle node 1](assets/loops.svg)
-
-This was the common pattern with TOKIMEKI users. We often found ourselves in the situation illustrated above, where some nodes were idle while others still had experiments left to run. This was the motivation for introducing the coordinator–executor model in v0.5.0.
-
-## 3. Coordinator and compute
-
-Tokimeki v0.5.0 defines two new kinds of job: coordinator and compute. A compute job is an ordinary job, which do training or other compute intensive task. Most jobs you submit in Tokimeki are compute jobs.
-
-We now *define* what a **coordinator** is. A coordinator is a job whose purpose is to submit other jobs, wait for them to finish, and collect their results. The example script in Section 2 above is, in deed, a coordinator script.
-
-In the example below, we write one coordinator script for each backbone. Each of the script further define their own search grid.
-
-```bash
-# train_alexnet.sh
-for lr in 0.01 0.001 0.0001; do
-    python train.py --backbone alexnet --lr "$lr"
-done
-
-# train_vgg.sh
-for lr in 0.02 0.0025 0.0003; do
-    python train.py --backbone vgg --lr "$lr"
-done
-```
-
-Inside `train.py`, which will be launched as part of the coordinator daemon, we start the actual training/compute logic. We will show how such logic can be written later.
-
-As before, all these jobs go into the same shared queue, and any runner with a free executor can pick them up. In Tokimeki v0.5.0, each of the runner can launch at most **one** coordinator daemon and an arbitrary number of executor daemons. In the diagram below, we assume 2.
-
-![Three GPU nodes, each a runner with one coordinator slot and two executors. The AlexNet coordinator on node 1 and the VGG coordinator on node 2 submit trials to the shared filesystem; node 3's coordinator slot is empty. Executors on all three nodes take trials, so AlexNet and VGG trials run mixed across all three nodes](assets/coordinators.svg)
-
-The two colours represent the experiments of the two coordinators. Both coordinators submit their experiments through the shared filesystem, and all six executors are available to run them.
-
-Unlike the original shell scripts, AlexNet experiments are no longer tied to one particular node, nor are VGG experiments. Whenever an executor becomes available, it can pick up another experiment from the queue.
-
-Since the overhead of such script is minimal, in this guide, for simplicity, we expect you to submit the coordinator script as a job to the Tokimeki runners also.
-
-**A coordinator doesn't necessarily have to run on a GPU node.** Since it only submits jobs and waits for their results, you can also run the Python script directly on your client (e.g., the login node). You'll need to keep the process alive until the experiments finish, for example by running it inside `tmux`. You also won't have the benefits of submitting the coordinator as a Tokimeki job, such as automatic retries and the ability to stop the entire group by killing or cancelling the coordinator.
-
-## 4. Groups
-
-A coordinator and its child compute jobs can all be part of a *group*. A group is simply a name shared by a set of related jobs. Groups allow us to track those jobs and wait for them collectively, regardless of which runners execute them. A coordinator and the jobs it submits share the same group name. For our hyperparameter sweep, we'll use a separate group for each backbone; in the illustration above, each colour is one group.
-
-## 5. Example: sweeping the learning rate for AlexNet
-
-First, define what an individual experiment should do. Put the training function in an importable Python module, such as `model_trainer/jobs.py`. Here, we assume that the project already has a `train_model` function that trains a model and returns a score.
+In this case, replace:
 
 ```python
-from model_trainer.training import train_model
-
-def train_trial(config):
-    score = train_model(config["backbone"], config["lr"])
-    return {"lr": config["lr"], "score": score}
-```
-
-Next, write the *coordinator script* as `scripts/sweep_alexnet.py`:
-
-```python
-import json
-from pathlib import Path
-
-import tokimeki as tk
-from model_trainer.jobs import train_trial
-
 group = tk.current_group()
-jobs = [
-    group.submit(train_trial, {"backbone": "alexnet", "lr": lr})
-    for lr in (0.01, 0.001, 0.0001)
-]
-
-group.wait()    # this blocks until all jobs finishes
-results = [group.result(job) for job in jobs]
-
-Path("results").mkdir(exist_ok=True)
-Path("results/alexnet-summary.json").write_text(json.dumps(results, indent=2))
 ```
 
-Each call to `group.submit()` creates a separate job that runs `train_trial` with the given arguments. These jobs automatically belong to the same group as the coordinator.
+with:
 
-Since the Tokimeki CLI takes scripts when submitting jobs, we'll wrap the Python script in `sweep_alexnet.sh`:
+```python
+group = tk.Group("models-001")
+```
+
+Then run:
 
 ```bash
-#!/bin/bash
-set -e
-cd /shared/projects/model_trainer
-uv run --no-sync python scripts/sweep_alexnet.py
+uv run python scripts/sweep.py
 ```
 
-We can do the same for VGG by creating `sweep_vgg.sh` and `scripts/sweep_vgg.py`, replacing the backbone with `"vgg"` and adjusting the configurations as needed. From the login node, submit both coordinators:
+The script still submits compute jobs to Tokimeki runners and retrieves their results. The difference is where the coordinator itself runs.
 
-```bash
-tokimeki submit -C -g alexnet-lr-01 sweep_alexnet.sh
-tokimeki submit -C -g vgg-lr-01 sweep_vgg.sh
-tokimeki group alexnet-lr-01      # Check the progress of the AlexNet sweep
-```
+When running directly, you are responsible for keeping the process alive until it finishes, for example using `tmux`.
 
-The `-C` flag tells Tokimeki that this is a coordinator job rather than a regular compute job. The `-g` flag specifies the group name, which we access through `tk.current_group()` in the Python script.
+By contrast, submitting the script with `tokimeki submit -C` allows Tokimeki to manage its lifecycle. Killing or canceling the coordinator also stops its group.
 
-Note that a group includes all jobs with the same name until they are removed by `tokimeki gc`. It is therefore a good idea to use a new group name each time you run a sweep.
+## Python API
 
-Killing or cancelling a coordinator also stops the other jobs in its group.
-
-Because each coordinator has its own group, `sweep_alexnet.py` only needs to wait for and collect the results of the AlexNet experiments, even though they run mixed with the VGG ones. The VGG coordinator does the same for its own group.
-
-Adding a ViT sweep would follow exactly the same pattern: write another coordinator and submit it with a separate group name.
-
-### Coordinator script as a training pipeline
-
-A coordinator script can do much more than simply submit jobs and collect results. For example, it can orchestrate a grid search, train the best-performing model, and run ablation studies on the resulting model. The actual computation is handled by compute jobs, not by the coordinator daemon itself.
-
-```bash
-python run_hpo.py --o /data/experiment1/hpo
-python train_finalist.py --config /data/experiment1/hpo/best.json -o /data/experiment1/chkpt
-python run_ablation.py --model /data/experiment1/chkpt/best.safetensors
-```
-
-## 6. How this works
-
-Both halves of the package take part in every Python job: the CLI wrapper runs in the coordinator, and the runtime runs on the runner that executes the job.
-
-`group.submit()` does not run anything itself, and it does not talk to any runner. It serializes the function call and pass the arguments to the `tokimeki` CLI (`tokimeki submit`), and it is the CLI that writes the job into a file on the shared filesystem (1): the name of the function (here `model_trainer.jobs:train_trial`) and its argument. Every method in this package works the same way, as one CLI call; `group.wait()` runs `tokimeki group --wait` and `group.result()` runs `tokimeki result`.
-
-On a GPU node, the runner is the same `tokimeki` binary, started as `tokimeki runner`. When one of its executors is free, it takes the job (2) and, because it is a Python job, runs this package's runtime in your project's environment (3):
-
-```bash
-uv run --project /shared/projects/my_paper --no-sync python -m tokimeki.call model_trainer.jobs:train_trial
-```
-
-`tokimeki.call` is Tokimeki's Python runtime. Its job is to call Python functions natively on behalf of the coordinator: the coordinator only names `train_trial` and gives it an argument, and `tokimeki.call` is what actually imports that function on the runner's node and calls it, in an ordinary Python process inside your project's environment. It fetches the argument through the CLI (`tokimeki job`), imports `train_trial`, and calls it with that argument (4).
-
-The runtime then hands the return value, or the exception if the function raised, to `tokimeki report`, which writes it next to the job (5). Back in the coordinator, `group.result()` gets that value from the CLI as well, through `tokimeki result` (6); the package itself never opens the file. The coordinator and the runner never talk to each other directly; everything between them is a file that one side's CLI writes and the other side's CLI reads.
-
-![(1) The coordinator's group.submit calls the tokimeki CLI, which writes train_trial and its argument into the job on the shared filesystem. (2) On a GPU node, tokimeki runner takes the job and (3) runs python -m tokimeki.call in an executor, which (4) calls train_trial with cfg and gets its return value. (5) The return value goes through tok report and is written into the job. (6) The coordinator's CLI reads it back with tok result](assets/python-job.svg)
-
-Because the function runs on another node, it has to be a top-level function that the runner can import from your project, and its **argument and return value have to be JSON-serializable**. The runner uses the project's existing environment without syncing it (`--no-sync`, so many jobs starting at once do not fight over it), so run `uv sync` before you submit.
-
-This section only covers what the package adds on top of Tokimeki. For how Tokimeki itself works underneath, including the queue, runners and their executors, and how every exchange between nodes goes through files, read the [CLI README](https://github.com/hungngocphat01/tokimeki-cli#architecture).
-
-## 7. What happens if a runner goes offline?
-
-Jobs that are still waiting in the queue can be picked up by other runners as usual. However, a job that was already running on the lost runner stops and cannot resume on another node from where it left off.
-
-The job will appear as **stopped** until a runner with the same ID starts again. At that point, Tokimeki marks the job as **crashed** and queues another attempt if retries were requested.
-
-Other runners continue executing their jobs independently, even if the runner that went offline was hosting a coordinator.
-
-Keep in mind that `group.wait()` may return while some jobs are in the stopped state. Calling `group.result(job)` on one of these jobs will raise an exception, so the coordinator in our example won't silently write an incomplete summary.
-
-You can inspect interrupted jobs through `group.report().stopped`.
-
-If the coordinator itself is retried, you may also want to check `group.jobs()` before submitting new jobs. Otherwise, the coordinator could submit experiments that it had already submitted during its previous attempt.
-
-## 8. Python API reference
-
-| Python | Description |
+| Python | Purpose |
 |---|---|
-| `tk.current_group()` | Get the group of the running coordinator. |
-| `tk.Group(name)` | Access a group by name. |
-| `group.submit(fn, arg)` | Submit an importable Python function with a single argument as a job. |
-| `group.wait()` | Wait until there are no queued or running jobs in the group. |
+| `tk.Group(name)` | Open a job group by name, including outside a Tokimeki job. |
+| `tk.current_group()` | Open the group associated with the running coordinator. |
+| `group.submit(fn, arg)` | Submit a Python function call as a compute job. |
+| `group.wait()` | Wait until all active jobs in the group finish. |
 | `group.result(job)` | Retrieve the return value of a completed job. |
-| `group.jobs()` / `group.report()` | Inspect the jobs in a group and their statuses. |
+| `group.jobs()` | Inspect the jobs in a group. |
+| `group.report()` | Retrieve information about the group's jobs and their statuses. |
 
-Both the argument passed to the function and its return value must be JSON-serializable. The argument must not exceed 64 KiB.
+### Job function requirements
 
-For larger outputs, such as model checkpoints, write them to files in your project directory instead of returning them directly.
+Functions submitted as compute jobs must be importable by the runners.
 
-The [usage guide](docs/USAGE.md) covers every option and the other use cases: chaining jobs, running the coordinator on the login node, handling failed and stopped jobs, and restarting a coordinator without duplicates. See `help(tk.Group.submit)` for the available scheduling options and the [CLI usage guide](https://github.com/hungngocphat01/tokimeki-cli/blob/main/docs/USAGE.md) for more information on managing jobs.
+Both the function argument and its return value must be JSON-serializable. Function arguments are limited to 64 KiB.
+
+For large outputs, such as trained model checkpoints, save them to files in a shared directory and return their paths instead.
+
+## Further documentation
+
+- [Python usage guide](docs/USAGE.md) — Scheduling options, job failures, retries, and Python job execution.
+- [Tokimeki CLI](https://github.com/hungngocphat01/tokimeki-cli) — Runner setup, job management, and CLI commands.

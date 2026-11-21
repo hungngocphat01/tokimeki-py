@@ -1,7 +1,7 @@
 # Tokimeki for Python — Usage Guide
 
-What you can do with the `tokimeki` Python package, and how. For why it
-exists and a full walkthrough of a sweep, see the [README](../README.md); for
+How to submit Python functions, run coordinators, and collect results. For a
+short introduction and first example, see the [README](../README.md); for
 the CLI and how Tokimeki works underneath, see the
 [CLI usage guide](https://github.com/hungngocphat01/tokimeki-cli/blob/main/docs/USAGE.md).
 Every function and method also has a docstring (`help(tk.Group.submit)`).
@@ -14,6 +14,7 @@ Every function and method also has a docstring (`help(tk.Group.submit)`).
 - [Submitting jobs](#submitting-jobs)
 - [A sweep from a coordinator job](#a-sweep-from-a-coordinator-job)
 - [A coordinator on the login node](#a-coordinator-on-the-login-node)
+- [How Python jobs run](#how-python-jobs-run)
 - [Waiting and collecting results](#waiting-and-collecting-results)
 - [When jobs fail or a runner disappears](#when-jobs-fail-or-a-runner-disappears)
 - [Restarting a coordinator without duplicates](#restarting-a-coordinator-without-duplicates)
@@ -120,9 +121,16 @@ group.submit(evaluate, cfg, after=[trained])
 
 ## A sweep from a coordinator job
 
-The usual pattern, covered step by step in the
-[README](../README.md#running-a-hyperparameter-sweep): one coordinator per
-sweep, submitted as a job, one group per sweep.
+For a sweep, submit one coordinator job per group. Each coordinator submits
+trials to the shared queue, and any runner with a free compute slot can take
+them. A runner has one coordinator slot alongside its compute slots, so a
+coordinator does not occupy a slot needed by its trials.
+
+If each model runs all its trials in a single shell script, a node that
+finishes its script cannot help with another model's remaining trials. Giving
+each trial its own job lets the next free runner take it.
+
+![Three nodes each running one model's trials in a loop. The AlexNet node has finished and is idle while VGG and ViT trials remain on other nodes](../assets/loops.svg)
 
 ```python
 # scripts/sweep_alexnet.py
@@ -137,7 +145,6 @@ results = [group.result(job) for job in jobs]
 ```
 
 ```bash
-# sweep_alexnet.sh
 #!/bin/bash
 set -e
 cd /shared/projects/model_trainer
@@ -174,6 +181,29 @@ uv run python scripts/sweep_alexnet.py
 Keep it running until the trials finish, e.g. inside `tmux`. You give up what
 a coordinator job gets: retries, and `tok kill` / `tok cancel` stopping the
 whole group.
+
+---
+
+## How Python jobs run
+
+The Python package has two roles. In the submitting script, its API calls the
+`tokimeki` CLI to submit jobs, inspect groups, and read results. On a runner,
+its runtime imports and calls the requested function in the project's synced
+uv environment. The package does not read or write Tokimeki's state files
+directly.
+
+When you call `group.submit(fn, arg)`, the package sends the function's
+importable name and its JSON argument to `tokimeki submit`. A runner takes the
+job and launches `python -m tokimeki.call` in the project's environment with
+`--no-sync`. The runtime gets the argument through the CLI, calls the function,
+and reports its return value or exception through the CLI. `group.result(job)`
+then reads the reported value through `tokimeki result`.
+
+![The submitting script calls the Tokimeki CLI, which writes the Python job to the shared filesystem. A runner executes the function through tokimeki.call and reports its result, which the submitting script reads through the CLI](../assets/python-job.svg)
+
+Runners use the existing project environment without syncing it when a job
+starts, so run `uv sync` before submitting jobs. The project and environment
+must be accessible from every runner that may take them.
 
 ---
 
