@@ -162,7 +162,7 @@ Note that this approach does not retry failed jobs. We let the handling up to th
 ### Requirements
 
 - Python 3.9+
-- [uv](https://docs.astral.sh/uv/)
+- [uv](https://docs.astral.sh/uv/) or conda
 - The `tokimeki` CLI available on `PATH`, or configured through `TOKIMEKI_BIN`
 - Configured [Tokimeki runners](https://github.com/hungngocphat01/tokimeki-cli#-setup) with a shared `TOKIMEKI_HOME`
 
@@ -172,13 +172,34 @@ Install the package in the uv project that contains your training code:
 
 ```bash
 cd /shared/projects/model_trainer
-uv add "tokimeki @ git+ssh://git@github.com/hungngocphat01/tokimeki-py@v0.5.0"
+uv add "tokimeki @ git+ssh://git@github.com/hungngocphat01/tokimeki-py@v0.8.0"
 uv sync
 ```
 
 The project directory and its synced Python environment must be accessible from every runner that may execute a compute job.
 
 When a job starts, the runner uses the existing environment without installing or synchronizing packages.
+
+### Using conda instead of uv
+
+Install the package into a conda environment on the shared filesystem:
+
+```bash
+conda activate /shared/envs/model_trainer
+pip install "tokimeki @ git+ssh://git@github.com/hungngocphat01/tokimeki-py@v0.8.0"
+```
+
+Run the coordinator inside that environment, for example from the bash script you submit as the coordinator:
+
+```bash
+source /opt/conda/etc/profile.d/conda.sh
+conda activate /shared/envs/model_trainer
+python scripts/sweep.py
+```
+
+Compute jobs then run in the same environment: the package sees it is in a conda environment and each job starts with `conda run -p <env> python ...`. `conda` must be on every runner's `PATH`, and the environment must be reachable at the same path from every runner.
+
+To choose explicitly, set `TK_EXECUTOR=python-uv` or `TK_EXECUTOR=python-conda` in the script that launches the coordinator.
 
 ## Running without a coordinator job
 

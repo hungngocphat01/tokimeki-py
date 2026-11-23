@@ -113,7 +113,57 @@ def test_get_job_entry_from_func_main_script(monkeypatch, tmp_path):
     assert tk.get_job_entry_from_func(run_one) == f"{script}:run_one"
 
 
-def test_submit_request(fake_tok):
+@pytest.fixture
+def uv_env(tmp_path, monkeypatch):
+    """This process looks like it runs in a uv environment."""
+    monkeypatch.delenv("TK_EXECUTOR", raising=False)
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / ".venv"))
+    return tmp_path / ".venv"
+
+
+@pytest.fixture
+def conda_env(tmp_path, monkeypatch):
+    """This process looks like it runs in a conda environment."""
+    monkeypatch.delenv("TK_EXECUTOR", raising=False)
+    prefix = tmp_path / "envs" / "evident"
+    (prefix / "conda-meta").mkdir(parents=True)
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    return prefix
+
+
+def test_executor_detected(uv_env, conda_env, monkeypatch):
+    assert tk.get_executor() == "python-conda"
+    monkeypatch.setattr(sys, "prefix", str(uv_env))
+    assert tk.get_executor() == "python-uv"
+
+
+def test_executor_override(conda_env, monkeypatch):
+    monkeypatch.setenv("TK_EXECUTOR", "python-uv")
+    assert tk.get_executor() == "python-uv"
+    monkeypatch.setenv("TK_EXECUTOR", "python-pip")
+    with pytest.raises(ValueError, match="TK_EXECUTOR='python-pip'"):
+        tk.get_executor()
+
+
+def test_submit_request_conda(fake_tok, conda_env):
+    fake_tok.respond("submit", stdout={"job_id": "j9", "position": 1})
+    tk.Group("g").submit(helpers.square, {"x": 3})
+    assert json.loads(fake_tok.calls()[0]["stdin"]) == {
+        "abi": 2, "type": "python-conda", "entry": "tests.helpers:square", "group": "g", "arg": {"x": 3},
+        "env": str(conda_env),
+    }
+
+
+def test_submit_request_conda_forced_outside_conda(fake_tok, uv_env, monkeypatch):
+    # No env sent: the engine takes $CONDA_PREFIX from the tok process.
+    monkeypatch.setenv("TK_EXECUTOR", "python-conda")
+    fake_tok.respond("submit", stdout={"job_id": "j9", "position": 1})
+    tk.Group("g").submit(helpers.square, {"x": 3})
+    assert json.loads(fake_tok.calls()[0]["stdin"])["type"] == "python-conda"
+    assert "env" not in json.loads(fake_tok.calls()[0]["stdin"])
+
+
+def test_submit_request(fake_tok, uv_env):
     fake_tok.respond("submit", stdout={"job_id": "j9", "position": 4})
     sub = tk.Group("g").submit(helpers.square, {"x": 3}, desc="cfg3", retries=1, priority=2,
                                after=[tk.Submitted("a1", 1), "a2"], project="/p", cwd="/w")

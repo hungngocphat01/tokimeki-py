@@ -36,6 +36,11 @@ def test_result_is_reported(job, fake_tok):
     assert fake_tok.calls()[0]["argv"] == ["job", "j1", "--json"]
 
 
+def test_conda_job_runs(job):
+    code, reports = job("tests.helpers:square", {"x": 3}, type_="python-conda")
+    assert code == call.EXIT_OK and reports == [{"result": {"x": 3, "square": 9}}]
+
+
 def test_none_result_reports_nothing(job):
     assert job("tests.helpers:nothing", {"x": 1}) == (call.EXIT_OK, [])
 
@@ -65,8 +70,8 @@ def test_unserializable_result_is_an_error(job):
         ("no_such_module:f", None, {}, "No module named 'no_such_module'"),
         ("tests.helpers:missing", None, {}, "has no function missing"),
         ("tests.helpers:square", "tests.helpers:boom", {}, "does not match"),
-        ("tests.helpers:square", None, {"type_": "bash"}, "runs python-uv jobs"),
-        ("tests.helpers:square", None, {"abi": 3}, "runs python-uv jobs"),
+        ("tests.helpers:square", None, {"type_": "bash"}, "runs python-uv and python-conda jobs"),
+        ("tests.helpers:square", None, {"abi": 3}, "runs python-uv and python-conda jobs"),
         ("square", None, {}, "must be module:function"),
     ],
 )

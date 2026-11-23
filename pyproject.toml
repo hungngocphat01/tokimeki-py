@@ -1,6 +1,6 @@
 [project]
 name = "tokimeki"
-version = "0.5.0"
+version = "0.8.0"
 description = "Thin Python wrapper around the tokimeki CLI: submit Python functions as jobs, wait on groups, read results."
 readme = "README.md"
 requires-python = ">=3.9"

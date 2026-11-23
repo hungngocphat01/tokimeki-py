@@ -3,10 +3,10 @@
 Why the package looks the way it does. For using it, see the
 [README](../README.md); for how tokimeki works, the CLI docs
 (`tokimeki-cli/docs/HOW-IT-WORKS.md`, `USAGE.md`). The engine-side contract
-(the `python-uv` execute type, the job environment, `tok report`) is
+(the `python-uv` and `python-conda` execute types, the job environment, `tok report`) is
 specified in `tokimeki-engine/docs/protocol.md`.
 
-Status: implemented for v0.5.0 (execute ABI 2).
+Status: implemented for v0.8.0 (execute ABI 2). Versioning: see `AGENTS.md`.
 
 ## Principles (from the user)
 
@@ -40,6 +40,13 @@ Status: implemented for v0.5.0 (execute ABI 2).
   (`group.jobs()` + `desc`), as decided for coordinators in phase 2.
 - **No `Group.stop()`** yet: there is no CLI command to stop a group by name;
   killing the coordinator stops its group.
+- **uv or conda: detected, overridable.** `group.submit` sends the
+  execute type of the coordinator's own environment: `python-conda` (with
+  `env=sys.prefix`) when `sys.prefix` has `conda-meta/`, else `python-uv`.
+  `TK_EXECUTOR=python-uv|python-conda`, set in the script that launches the
+  coordinator, overrides it (`get_executor`). Forcing conda outside a conda
+  environment sends no `env`, so the engine uses `$CONDA_PREFIX`. The
+  runner uses `conda run`, so the env's activation scripts run.
 - **`Group.result` raises `not_found`** for a job without a result, rather
   than returning `None`, so a `None` return and a missing result can't be
   confused.
@@ -60,4 +67,5 @@ runner's command line, `tok job --json` (`execute.entry`, `execute.arg`,
   `TOKIMEKI_TEST_BIN`), with a stand-in `uv` that execs
   `python -m tokimeki.call`.
 - Docker (2026-11-20, recorded in the engine roadmap memo): a three-runner
-  cluster with real `uv` and an evident-like sweep project.
+  cluster with real `uv` and an evident-like sweep project; again on
+  2026-11-23 with real conda (miniforge) for `python-conda`.

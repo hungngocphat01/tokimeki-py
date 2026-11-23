@@ -12,10 +12,10 @@ writes no files.
 """
 
 from ._cli import TokimekiError, TokimekiWarning
-from ._group import Group, current_group, current_job_id, get_job_entry_from_func
+from ._group import Group, current_group, current_job_id, get_executor, get_job_entry_from_func
 from ._types import Counts, GroupReport, Job, JobError, Submitted
 
-__version__ = "0.5.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "Counts",
@@ -28,5 +28,6 @@ __all__ = [
     "TokimekiWarning",
     "current_group",
     "current_job_id",
+    "get_executor",
     "get_job_entry_from_func",
 ]

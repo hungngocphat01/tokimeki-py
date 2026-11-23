@@ -1,8 +1,9 @@
 """Job runtime: ``python -m tokimeki.call <entry>``.
 
-The runner starts every python-uv job as::
+The runner starts every python job as one of::
 
     uv run --project <project> --no-sync python -m tokimeki.call <entry>
+    conda run -p <env> --no-capture-output python -m tokimeki.call <entry>
 
 in the job's working directory. This module then:
 
@@ -70,7 +71,7 @@ def main(argv: Optional[list] = None) -> int:
 
 def _read_job_execute(entry: str) -> dict:
     """Return the ``execute`` part of this job's record, checking that it is
-    a python-uv job for ``entry``."""
+    a python job for ``entry``."""
     job_id = os.environ.get("TOKIMEKI_JOB_ID")
     if not job_id:
         raise LoadError("TOKIMEKI_JOB_ID is not set; tokimeki.call only runs inside a tokimeki job")
@@ -78,10 +79,10 @@ def _read_job_execute(entry: str) -> dict:
     job = run(["job", job_id])
     execute = job.get("execute") or {}
 
-    if execute.get("type") != "python-uv" or execute.get("abi") != 2:
+    if execute.get("type") not in ("python-uv", "python-conda") or execute.get("abi") != 2:
         raise LoadError(
             f"job {job_id} is a {execute.get('type')!r} job with abi {execute.get('abi')}; "
-            "this runtime runs python-uv jobs with abi 2"
+            "this runtime runs python-uv and python-conda jobs with abi 2"
         )
     if execute.get("entry") != entry:
         raise LoadError(f"entry {entry!r} does not match job {job_id}'s entry {execute.get('entry')!r}")

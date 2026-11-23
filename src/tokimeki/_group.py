@@ -12,8 +12,40 @@ from ._types import GroupReport, Job, Submitted
 
 ENV_GROUP = "TOKIMEKI_GROUP"
 ENV_JOB_ID = "TOKIMEKI_JOB_ID"
+ENV_EXECUTOR = "TK_EXECUTOR"
+
+EXECUTORS = ("python-uv", "python-conda")
 
 JobLike = Union[str, Job, Submitted]
+
+
+def get_executor() -> str:
+    """Return the execute type that runs jobs in this Python's environment.
+
+    ``$TK_EXECUTOR`` decides when set. Otherwise a conda environment (one
+    with ``conda-meta/`` under ``sys.prefix``) gives ``"python-conda"`` and
+    anything else ``"python-uv"``.
+
+    Returns
+    -------
+    str
+        ``"python-uv"`` or ``"python-conda"``.
+
+    Raises
+    ------
+    ValueError
+        If ``$TK_EXECUTOR`` is set to anything else.
+    """
+    override = os.environ.get(ENV_EXECUTOR)
+    if override:
+        if override not in EXECUTORS:
+            raise ValueError(f"{ENV_EXECUTOR}={override!r}; want one of {', '.join(EXECUTORS)}")
+        return override
+    return "python-conda" if _in_conda_env() else "python-uv"
+
+
+def _in_conda_env() -> bool:
+    return os.path.isdir(os.path.join(sys.prefix, "conda-meta"))
 
 
 def get_job_entry_from_func(fn: Callable) -> str:
@@ -126,8 +158,10 @@ class Group:
     ) -> Submitted:
         """Queue ``fn(arg)`` as a compute job in this group.
 
-        The job runs ``fn`` in the uv project ``project`` on whichever
-        runner has a free compute slot. Its return value can be read with
+        The job runs ``fn`` in the same kind of environment as this
+        process (see :func:`get_executor`) on whichever runner has a free
+        compute slot: in the uv project ``project``, or through
+        ``conda run`` in this conda environment. Its return value can be read with
         :meth:`result`.
 
         Parameters
@@ -155,9 +189,13 @@ class Group:
         after : iterable of str, Job or Submitted, optional
             Jobs that must complete before this one starts.
         project : str, optional
-            The uv project directory (with ``pyproject.toml``) to run in.
-            Defaults to the current directory. The project's environment
-            must already be synced and must depend on ``tokimeki``.
+            uv only: the uv project directory (with ``pyproject.toml``) to
+            run in. Defaults to the current directory. The project's
+            environment must already be synced and must depend on
+            ``tokimeki``. A conda job always runs in this process's conda
+            environment (``sys.prefix``, or ``$CONDA_PREFIX`` when
+            ``$TK_EXECUTOR`` forces conda outside one), which must have
+            ``tokimeki`` installed; giving ``project`` is rejected.
         cwd : str, optional
             The job's working directory. Defaults to the current directory.
         worker : str, optional
@@ -174,17 +212,22 @@ class Group:
             If ``arg`` is not JSON-serializable, or ``fn`` is not a function.
         ValueError
             If ``fn`` cannot be imported by a job (see
-            :func:`get_job_entry_from_func`).
+            :func:`get_job_entry_from_func`), or ``$TK_EXECUTOR`` is
+            invalid.
         TokimekiError
             If tokimeki rejects the request (code ``invalid_argument``),
-            e.g. ``arg`` is too large.
+            e.g. ``arg`` is too large, or ``project`` is given for a conda
+            job.
 
         Examples
         --------
         >>> for cfg in expand_sweep(grid):
         ...     group.submit(run_experiment, cfg, desc=cfg["run_id"], retries=1)
         """
-        req = {"abi": 2, "type": "python-uv", "entry": get_job_entry_from_func(fn), "group": self.name}
+        executor = get_executor()
+        req = {"abi": 2, "type": executor, "entry": get_job_entry_from_func(fn), "group": self.name}
+        if executor == "python-conda" and _in_conda_env():
+            req["env"] = sys.prefix
         if arg is not None:
             req["arg"] = arg
         optional = {
